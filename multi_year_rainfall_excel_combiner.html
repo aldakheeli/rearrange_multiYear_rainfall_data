@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Multi-Year Rainfall Excel Combiner</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f7fb; margin: 0; padding: 30px; color: #222; }
+    .container { max-width: 950px; margin: auto; background: #fff; padding: 28px; border-radius: 16px; box-shadow: 0 8px 25px rgba(0,0,0,0.08); }
+    h1 { margin-top: 0; color: #1b4d89; }
+    .box { border: 2px dashed #9bbce0; padding: 25px; border-radius: 12px; text-align: center; background: #f9fcff; margin: 20px 0; }
+    input, button { padding: 12px; font-size: 15px; border-radius: 8px; }
+    input[type="number"] { width: 120px; border: 1px solid #ccc; }
+    input[type="file"] { max-width: 100%; }
+    button { border: none; background: #1b4d89; color: white; cursor: pointer; margin-top: 15px; margin-right: 8px; }
+    button:hover { background: #153b68; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .note { background: #fff8df; border-left: 5px solid #e1b12c; padding: 12px; border-radius: 6px; margin-top: 15px; line-height: 1.5; }
+    .success { background: #eaf8ef; border-left: 5px solid #22a35a; padding: 12px; border-radius: 6px; margin-top: 15px; line-height: 1.5; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+    th { background: #e9f2ff; }
+    .status { margin-top: 15px; font-weight: bold; color: #1b4d89; white-space: pre-line; }
+    .small { font-size: 13px; color: #555; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Multi-Year Rainfall Excel Combiner</h1>
+    <p>
+      Upload several rainfall Excel sheets, one file per water year.
+      The tool will rearrange all files, combine them, sort by date, and download
+      one CSV file with two columns: <b>Date</b> and <b>Rainfall_mm</b>.
+    </p>
+
+    <div class="box">
+      <input type="file" id="fileInput" accept=".xlsx,.xls" multiple />
+      <br><br>
+
+      <label>Fallback start year if filename has no year:</label>
+      <input type="number" id="fallbackYear" value="2024" />
+      <p class="small">
+        Best filename examples: <b>2024-2025 Mosul.xlsx</b>, <b>Mosul_2023_2024.xlsx</b>, or <b>Rainfall 2022-2023.xlsx</b>.
+        The first year is used as the water-year start year.
+      </p>
+
+      <button id="processBtn" disabled>Process and Download Combined CSV</button>
+      <button id="excelBtn" disabled>Download Combined Excel</button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="note">
+      <b>Expected sheet layout:</b> Each Excel file should contain month headers such as
+      ت1، ت2، ك1، ك2، شباط، اذار، نيسان، ايار، حزيران، تموز، اب، ايلول.
+      Blank rainfall cells are automatically converted to zero.
+    </div>
+
+    <div class="success">
+      <b>Output:</b> The final combined file will contain all daily records from all uploaded years,
+      sorted from oldest date to newest date.
+    </div>
+
+    <h3>Preview of Combined Data</h3>
+    <table id="previewTable">
+      <thead>
+        <tr><th>Date</th><th>Rainfall_mm</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script>
+let selectedFiles = [];
+let combinedOutput = [];
+
+const monthMap = {
+  "ت1": 10, "ت 1": 10, "تشرين الاول": 10, "تشرين الأول": 10, "اكتوبر": 10, "أكتوبر": 10,
+  "ت2": 11, "ت 2": 11, "تشرين الثاني": 11, "نوفمبر": 11,
+  "ك1": 12, "ك 1": 12, "كانون الاول": 12, "كانون الأول": 12, "ديسمبر": 12,
+  "ك2": 1, "ك 2": 1, "كانون الثاني": 1, "يناير": 1,
+  "شباط": 2, "فبراير": 2,
+  "اذار": 3, "آذار": 3, "مارس": 3,
+  "نيسان": 4, "ابريل": 4, "أبريل": 4,
+  "ايار": 5, "أيار": 5, "مايو": 5,
+  "حزيران": 6, "يونيو": 6,
+  "تموز": 7, "يوليو": 7,
+  "اب": 8, "آب": 8, "اغسطس": 8, "أغسطس": 8,
+  "ايلول": 9, "أيلول": 9, "سبتمبر": 9
+};
+
+function normalizeArabic(text) {
+  if (text === null || text === undefined) return "";
+  return String(text)
+    .trim()
+    .replace(/[إأآا]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/\s+/g, " ");
+}
+
+function getStartYearFromFilename(filename, fallbackYear) {
+  const matches = filename.match(/(19|20)\d{2}/g);
+  if (matches && matches.length > 0) return parseInt(matches[0], 10);
+  return fallbackYear;
+}
+
+function findMonthHeaderRow(rows) {
+  let bestRow = -1;
+  let bestCount = 0;
+  for (let r = 0; r < rows.length; r++) {
+    let count = 0;
+    for (let c = 0; c < rows[r].length; c++) {
+      const cell = normalizeArabic(rows[r][c]);
+      if (monthMap[cell]) count++;
+    }
+    if (count > bestCount) {
+      bestCount = count;
+      bestRow = r;
+    }
+  }
+  return bestCount >= 3 ? bestRow : -1;
+}
+
+function daysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+function dateString(year, month, day) {
+  return year + "-" + String(month).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = event => resolve(event.target.result);
+    reader.onerror = error => reject(error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function processWorkbook(workbook, fileName, startYear) {
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+  const headerRow = findMonthHeaderRow(rows);
+  if (headerRow === -1) throw new Error("Could not find month headers in: " + fileName);
+
+  const monthColumns = [];
+  rows[headerRow].forEach((value, colIndex) => {
+    const norm = normalizeArabic(value);
+    if (monthMap[norm]) {
+      monthColumns.push({ col: colIndex, month: monthMap[norm], label: value });
+    }
+  });
+
+  const records = [];
+  monthColumns.forEach(item => {
+    const month = item.month;
+    const year = month >= 10 ? startYear : startYear + 1;
+    const maxDays = daysInMonth(year, month);
+
+    for (let day = 1; day <= maxDays; day++) {
+      const rowIndex = headerRow + 2 + (day - 1);
+      let value = 0;
+
+      if (rows[rowIndex] && rows[rowIndex][item.col] !== undefined && rows[rowIndex][item.col] !== "") {
+        value = rows[rowIndex][item.col];
+      }
+
+      const numericValue = Number(value);
+      records.push({
+        Date: dateString(year, month, day),
+        Rainfall_mm: isNaN(numericValue) ? 0 : numericValue
+      });
+    }
+  });
+
+  return records;
+}
+
+function downloadCSV(records) {
+  const header = "Date,Rainfall_mm\n";
+  const lines = records.map(r => r.Date + "," + r.Rainfall_mm).join("\n");
+  const csvContent = header + lines;
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "combined_daily_rainfall.csv";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function downloadExcel(records) {
+  const aoa = [["Date", "Rainfall_mm"]].concat(records.map(r => [r.Date, r.Rainfall_mm]));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Combined Rainfall");
+  XLSX.writeFile(wb, "combined_daily_rainfall.xlsx");
+}
+
+function updatePreview(records) {
+  const tbody = document.querySelector("#previewTable tbody");
+  tbody.innerHTML = "";
+  records.slice(0, 15).forEach(row => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + row.Date + "</td><td>" + row.Rainfall_mm + "</td>";
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById("fileInput").addEventListener("change", function(e) {
+  selectedFiles = Array.from(e.target.files);
+  document.getElementById("processBtn").disabled = selectedFiles.length === 0;
+  document.getElementById("excelBtn").disabled = true;
+  document.getElementById("status").textContent =
+    selectedFiles.length > 0 ? selectedFiles.length + " file(s) selected." : "";
+});
+
+document.getElementById("processBtn").addEventListener("click", async function() {
+  const fallbackYear = parseInt(document.getElementById("fallbackYear").value, 10);
+  const status = document.getElementById("status");
+  const allRecords = [];
+  const messages = [];
+
+  try {
+    for (const file of selectedFiles) {
+      const startYear = getStartYearFromFilename(file.name, fallbackYear);
+      const data = await readFileAsArrayBuffer(file);
+      const workbook = XLSX.read(new Uint8Array(data), { type: "array" });
+      const records = processWorkbook(workbook, file.name, startYear);
+      allRecords.push(...records);
+      messages.push(file.name + ": " + records.length + " records, water year " + startYear + "-" + (startYear + 1));
+    }
+
+    allRecords.sort((a, b) => a.Date.localeCompare(b.Date));
+
+    const seen = new Set();
+    combinedOutput = [];
+    allRecords.forEach(r => {
+      if (!seen.has(r.Date)) {
+        seen.add(r.Date);
+        combinedOutput.push(r);
+      }
+    });
+
+    updatePreview(combinedOutput);
+    downloadCSV(combinedOutput);
+    document.getElementById("excelBtn").disabled = false;
+
+    status.textContent =
+      "Done. Combined records: " + combinedOutput.length + "\n" +
+      messages.join("\n") +
+      (combinedOutput.length < allRecords.length ? "\nDuplicate dates removed: " + (allRecords.length - combinedOutput.length) : "");
+
+  } catch (error) {
+    status.textContent = "Error: " + error.message;
+    alert(error.message);
+  }
+});
+
+document.getElementById("excelBtn").addEventListener("click", function() {
+  if (combinedOutput.length > 0) downloadExcel(combinedOutput);
+});
+</script>
+</body>
+</html>
